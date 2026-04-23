@@ -11,14 +11,21 @@ const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '';
 const GROUP_USERNAME = process.env.GROUP_USERNAME || '';
 const ADMIN_1 = process.env.ADMIN_1 || '@deplaoreal';
 const ADMIN_2 = process.env.ADMIN_2 || '@Otdoreal';
-const QR_PATH = path.join(__dirname, 'qr-sacombank.jpg');
 
-if (!BOT_TOKEN) throw new Error('Thiếu BOT_TOKEN trong file .env');
+if (!BOT_TOKEN) {
+  throw new Error('Thiếu BOT_TOKEN trong biến môi trường');
+}
+
+const QR_PATH = path.join(__dirname, 'qr-sacombank.jpg');
+const HAS_QR = fs.existsSync(QR_PATH);
 
 const bot = new Telegraf(BOT_TOKEN);
 
+const adminCache = new Map();
+const ADMIN_CACHE_TTL = 5 * 60 * 1000;
+
 function inviteUrl(link, username) {
-  if (username) return `https://t.me/${username.replace('@', '')}`;
+  if (username) return `https://t.me/${String(username).replace('@', '')}`;
   return link;
 }
 
@@ -28,6 +35,10 @@ function adminUrl(username) {
 
 function isPrivateChat(ctx) {
   return ctx.chat?.type === 'private';
+}
+
+function isGroupChat(ctx) {
+  return ['group', 'supergroup'].includes(ctx.chat?.type);
 }
 
 function startKeyboard() {
@@ -104,25 +115,13 @@ function hasTelegramLinkEntity(msg = {}) {
 function hasLink(text = '', msg = {}) {
   const value = String(text).toLowerCase();
 
-  const textMatch =
-    value.includes('http://') ||
-    value.includes('https://') ||
-    value.includes('www.') ||
-    value.includes('t.me/') ||
-    value.includes('telegram.me/') ||
-    value.includes('.com') ||
-    value.includes('.net') ||
-    value.includes('.org') ||
-    value.includes('.io') ||
-    value.includes('.me') ||
-    value.includes('.vn') ||
-    value.includes('.xyz') ||
-    value.includes('.cc') ||
-    value.includes('.gg') ||
-    value.includes('.co') ||
-    /@\w{5,}/.test(value);
+  const urlRegex =
+    /(https?:\/\/\S+)|(www\.\S+)|(t\.me\/\S+)|(telegram\.me\/\S+)/i;
 
-  return textMatch || hasTelegramLinkEntity(msg);
+  const domainRegex =
+    /\b[a-z0-9-]+\.(com|net|org|io|me|vn|xyz|cc|gg|co)\b/i;
+
+  return urlRegex.test(value) || domainRegex.test(value) || hasTelegramLinkEntity(msg);
 }
 
 function warningText(reason = 'nội dung không phù hợp') {
@@ -131,11 +130,12 @@ function warningText(reason = 'nội dung không phù hợp') {
     banned: 'Từ này hơi gắt, bot cất giúp rồi nhé.',
     both: 'Nhóm mình nói chuyện xinh thôi, đừng làm bot khó xử 🥹'
   };
+
   return lines[reason] || 'Nhóm mình nói chuyện xinh thôi, đừng làm bot khó xử 🥹';
 }
 
 async function sendCoffee(ctx, text = coffeeCaption()) {
-  if (fs.existsSync(QR_PATH)) {
+  if (HAS_QR) {
     return ctx.replyWithPhoto(Input.fromLocalFile(QR_PATH), {
       caption: text,
       reply_markup: adminKeyboard().reply_markup
@@ -145,46 +145,105 @@ async function sendCoffee(ctx, text = coffeeCaption()) {
   return ctx.reply(text, adminKeyboard());
 }
 
+function getAdminCacheKey(chatId, userId) {
+  return `${chatId}:${userId}`;
+}
+
+async function isUserAdmin(ctx, userId) {
+  const chatId = ctx.chat?.id;
+  if (!chatId || !userId) return false;
+
+  const cacheKey = getAdminCacheKey(chatId, userId);
+  const cached = adminCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.timestamp < ADMIN_CACHE_TTL) {
+    return cached.isAdmin;
+  }
+
+  const member = await ctx.telegram.getChatMember(chatId, userId);
+  const isAdmin = ['creator', 'administrator'].includes(member.status);
+
+  adminCache.set(cacheKey, {
+    isAdmin,
+    timestamp: Date.now()
+  });
+
+  return isAdmin;
+}
+
+async function safeDeleteMessage(ctx, chatId, messageId) {
+  try {
+    await ctx.telegram.deleteMessage(chatId, messageId);
+    return true;
+  } catch (e) {
+    console.error('Delete message failed:', e.response?.description || e.message);
+    return false;
+  }
+}
+
 bot.start(async (ctx) => {
   if (!isPrivateChat(ctx)) return;
 
-  await ctx.reply(startMessage(), {
-    parse_mode: 'HTML',
-    ...startKeyboard()
-  });
+  try {
+    await ctx.reply(startMessage(), {
+      parse_mode: 'HTML',
+      ...startKeyboard()
+    });
 
-  await sendCoffee(ctx);
+    await sendCoffee(ctx);
+  } catch (e) {
+    console.error('/start failed:', e.response?.description || e.message);
+  }
 });
 
 bot.action('show_coffee', async (ctx) => {
-  await ctx.answerCbQuery();
-  if (!isPrivateChat(ctx)) return;
-  return sendCoffee(ctx);
+  try {
+    await ctx.answerCbQuery();
+    if (!isPrivateChat(ctx)) return;
+    await sendCoffee(ctx);
+  } catch (e) {
+    console.error('show_coffee failed:', e.response?.description || e.message);
+  }
 });
 
 bot.command('coffee', async (ctx) => {
   if (!isPrivateChat(ctx)) return;
-  return sendCoffee(ctx);
+
+  try {
+    await sendCoffee(ctx);
+  } catch (e) {
+    console.error('/coffee failed:', e.response?.description || e.message);
+  }
 });
 
 bot.command('admins', async (ctx) => {
   if (!isPrivateChat(ctx)) return;
-  return ctx.reply(adminCaption(), adminKeyboard());
+
+  try {
+    await ctx.reply(adminCaption(), adminKeyboard());
+  } catch (e) {
+    console.error('/admins failed:', e.response?.description || e.message);
+  }
 });
 
 bot.command('ping', async (ctx) => {
-  console.log('PING CMD:', ctx.chat?.id, ctx.chat?.type);
-  return ctx.reply(`pong: ${ctx.chat?.type}`);
+  try {
+    console.log('PING CMD:', ctx.chat?.id, ctx.chat?.type);
+    await ctx.reply(`pong: ${ctx.chat?.type}`);
+  } catch (e) {
+    console.error('/ping failed:', e.response?.description || e.message);
+  }
 });
 
 bot.on('text', async (ctx, next) => {
   if (!isPrivateChat(ctx)) return next();
-  if (ctx.message.text.startsWith('/')) return next();
+  if (ctx.message?.text?.startsWith('/')) return next();
 
-  return ctx.reply(startMessage(), {
-    parse_mode: 'HTML',
-    ...startKeyboard()
-  });
+  try {
+    return await ctx.reply('Chọn nút bên dưới nha 👇', startKeyboard());
+  } catch (e) {
+    console.error('Private text reply failed:', e.response?.description || e.message);
+  }
 });
 
 bot.on('message', async (ctx) => {
@@ -200,7 +259,7 @@ bot.on('message', async (ctx) => {
     msg?.text || msg?.caption || '[non-text]'
   );
 
-  if (!['group', 'supergroup'].includes(chatType)) return;
+  if (!isGroupChat(ctx)) return;
   if (!msg) return;
   if (msg.from?.is_bot) return;
 
@@ -212,10 +271,7 @@ bot.on('message', async (ctx) => {
   }
 
   try {
-    const member = await ctx.telegram.getChatMember(ctx.chat.id, msg.from.id);
-    const isAdmin = ['creator', 'administrator'].includes(member.status);
-
-    console.log('Member status:', member.status);
+    const isAdmin = await isUserAdmin(ctx, msg.from.id);
 
     if (isAdmin) {
       console.log('Skip admin message');
@@ -241,28 +297,32 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  try {
-    console.log('Trying delete message id:', msg.message_id);
+  const reason = isLink && isBanned ? 'both' : isLink ? 'link' : 'banned';
 
-    await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id);
+  try {
+    const deleted = await safeDeleteMessage(ctx, ctx.chat.id, msg.message_id);
+    if (!deleted) return;
+
     console.log('Deleted message:', msg.message_id);
 
-    const reason = isLink && isBanned ? 'both' : isLink ? 'link' : 'banned';
     const notice = await ctx.reply(warningText(reason));
     console.log('Sent notice:', notice.message_id);
 
     setTimeout(async () => {
-      try {
-        await ctx.telegram.deleteMessage(ctx.chat.id, notice.message_id);
-        console.log('Deleted notice:', notice.message_id);
-      } catch (e) {
-        console.error('Delete notice failed:', e.response?.description || e.message);
-      }
+      await safeDeleteMessage(ctx, ctx.chat.id, notice.message_id);
     }, 8000);
   } catch (e) {
-    console.error('Delete moderated message failed:', e.response?.description || e.message);
+    console.error('Moderation flow failed:', e.response?.description || e.message);
     console.error('Entities:', msg.entities || msg.caption_entities || []);
   }
+});
+
+bot.catch((err, ctx) => {
+  console.error(
+    'Telegraf error:',
+    ctx?.updateType,
+    err.response?.description || err.message || err
+  );
 });
 
 console.log('Starting bot...');
@@ -276,5 +336,20 @@ bot.launch()
     console.error('Launch failed:', err.response?.description || err.message);
   });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  console.log('Received SIGINT, stopping bot...');
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  console.log('Received SIGTERM, stopping bot...');
+  bot.stop('SIGTERM');
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
