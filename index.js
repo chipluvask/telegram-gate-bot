@@ -24,6 +24,13 @@ const bot = new Telegraf(BOT_TOKEN);
 const adminCache = new Map();
 const ADMIN_CACHE_TTL = 5 * 60 * 1000;
 
+// Chỉ nhận diện link referral Telegram kiểu:
+// https://t.me/xxx_bot?start=ref_xxxxx
+// http://t.me/xxx_bot?start=ref_xxxxx
+// t.me/xxx_bot?start=ref_xxxxx
+const TELEGRAM_REF_LINK_REGEX =
+  /(?:https?:\/\/)?t\.me\/[a-zA-Z0-9_]{5,}(?:\?start=ref_[a-zA-Z0-9_-]+)/i;
+
 function inviteUrl(link, username) {
   if (username) return `https://t.me/${String(username).replace('@', '')}`;
   return link;
@@ -101,32 +108,47 @@ function hasBannedWord(text = '') {
   return BANNED_WORDS.some((word) => normalized.includes(normalizeText(word)));
 }
 
-function hasTelegramLinkEntity(msg = {}) {
+function getEntityText(sourceText = '', entity = {}) {
+  if (typeof entity.offset !== 'number' || typeof entity.length !== 'number') {
+    return '';
+  }
+  return sourceText.slice(entity.offset, entity.offset + entity.length);
+}
+
+function isTelegramReferralLink(value = '') {
+  return TELEGRAM_REF_LINK_REGEX.test(String(value || '').trim());
+}
+
+function hasReferralTelegramLink(text = '', msg = {}) {
+  if (isTelegramReferralLink(text)) return true;
+
+  const sourceText = String(msg.text || msg.caption || '');
   const entities = [
     ...(msg.entities || []),
     ...(msg.caption_entities || [])
   ];
 
-  return entities.some((entity) =>
-    ['url', 'text_link', 'mention', 'text_mention'].includes(entity.type)
-  );
-}
+  for (const entity of entities) {
+    if (entity.type === 'text_link' && entity.url) {
+      if (isTelegramReferralLink(entity.url)) {
+        return true;
+      }
+    }
 
-function hasLink(text = '', msg = {}) {
-  const value = String(text).toLowerCase();
+    if (entity.type === 'url') {
+      const entityText = getEntityText(sourceText, entity);
+      if (isTelegramReferralLink(entityText)) {
+        return true;
+      }
+    }
+  }
 
-  const urlRegex =
-    /(https?:\/\/\S+)|(www\.\S+)|(t\.me\/\S+)|(telegram\.me\/\S+)/i;
-
-  const domainRegex =
-    /\b[a-z0-9-]+\.(com|net|org|io|me|vn|xyz|cc|gg|co)\b/i;
-
-  return urlRegex.test(value) || domainRegex.test(value) || hasTelegramLinkEntity(msg);
+  return false;
 }
 
 function warningText(reason = 'nội dung không phù hợp') {
   const lines = {
-    link: 'Link này bot xin giữ ngoài cửa nha 😌',
+    ref_link: 'Link ref Telegram này bot xin giữ ngoài cửa nha 😌',
     banned: 'Từ này hơi gắt, bot cất giúp rồi nhé.',
     both: 'Nhóm mình nói chuyện xinh thôi, đừng làm bot khó xử 🥹'
   };
@@ -265,11 +287,6 @@ bot.on('message', async (ctx) => {
 
   const text = msg.text || msg.caption || '';
 
-  if (!text && !hasTelegramLinkEntity(msg)) {
-    console.log('Skip: no text and no link entity');
-    return;
-  }
-
   try {
     const isAdmin = await isUserAdmin(ctx, msg.from.id);
 
@@ -282,22 +299,26 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  const isLink = hasLink(text, msg);
+  const isReferralLink = hasReferralTelegramLink(text, msg);
   const isBanned = hasBannedWord(text);
 
   console.log('Moderation check:', {
     text,
-    isLink,
+    isReferralLink,
     isBanned,
     entities: msg.entities || msg.caption_entities || []
   });
 
-  if (!isLink && !isBanned) {
+  if (!isReferralLink && !isBanned) {
     console.log('Skip: not violating');
     return;
   }
 
-  const reason = isLink && isBanned ? 'both' : isLink ? 'link' : 'banned';
+  const reason = isReferralLink && isBanned
+    ? 'both'
+    : isReferralLink
+      ? 'ref_link'
+      : 'banned';
 
   try {
     const deleted = await safeDeleteMessage(ctx, ctx.chat.id, msg.message_id);
