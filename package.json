@@ -1,0 +1,14 @@
+{
+  "name": "telegram-gate-bot",
+  "version": "1.0.0",
+  "description": "Telegram gate bot with channel/group verification and weekly coffee QR reminder",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "node-cron": "^3.0.3",
+    "telegraf": "^4.16.3"
+  }
+}
