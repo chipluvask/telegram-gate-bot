@@ -29,7 +29,7 @@ const ADMIN_CACHE_TTL = 5 * 60 * 1000;
 // http://t.me/xxx_bot?start=ref_xxxxx
 // t.me/xxx_bot?start=ref_xxxxx
 const TELEGRAM_REF_LINK_REGEX =
-  /(?:https?:\/\/)?t\.me\/[a-zA-Z0-9_]{5,}(?:\?start=ref_[a-zA-Z0-9_-]+)/i;
+  /(?:https?:\/\/)?t\.me\/[a-zA-Z0-9_]{5,}\?start=[a-zA-Z0-9_-]+/i;
 
 function inviteUrl(link, username) {
   if (username) return `https://t.me/${String(username).replace('@', '')}`;
