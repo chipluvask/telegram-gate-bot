@@ -1,6 +1,8 @@
 require('dotenv').config();
+
 const fs = require('fs');
 const path = require('path');
+const cron = require('node-cron');
 const { Telegraf, Markup, Input } = require('telegraf');
 const BANNED_WORDS = require('./banned-words.json');
 
@@ -11,6 +13,12 @@ const CHANNEL_USERNAME = process.env.CHANNEL_USERNAME || '';
 const GROUP_USERNAME = process.env.GROUP_USERNAME || '';
 const ADMIN_1 = process.env.ADMIN_1 || '@deplaoreal';
 const ADMIN_2 = process.env.ADMIN_2 || '@Otdoreal';
+const REMINDER_GROUP_ID = process.env.REMINDER_GROUP_ID || '';
+
+const ALLOWED_REF_BOTS = (process.env.ALLOWED_REF_BOTS || '')
+  .split(',')
+  .map((v) => v.trim().replace('@', '').toLowerCase())
+  .filter(Boolean);
 
 if (!BOT_TOKEN) {
   throw new Error('Thiếu BOT_TOKEN trong biến môi trường');
@@ -24,12 +32,51 @@ const bot = new Telegraf(BOT_TOKEN);
 const adminCache = new Map();
 const ADMIN_CACHE_TTL = 5 * 60 * 1000;
 
-// Chỉ nhận diện link referral Telegram kiểu:
-// https://t.me/xxx_bot?start=ref_xxxxx
-// http://t.me/xxx_bot?start=ref_xxxxx
-// t.me/xxx_bot?start=ref_xxxxx
-const TELEGRAM_REF_LINK_REGEX =
-  /(?:https?:\/\/)?t\.me\/[a-zA-Z0-9_]{5,}\?start=[a-zA-Z0-9_-]+/i;
+const TELEGRAM_BOT_REF_REGEX =
+  /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]*_bot)\?start=([a-zA-Z0-9_-]+)/gi;
+
+const COFFEE_MESSAGES = [
+  [
+    '☕ Tối thứ 7 rồi cả nhà ơi!',
+    '',
+    'Tuần qua bot vẫn âm thầm:',
+    '• Giữ group sạch, hạn chế link ref',
+    '• Chia sẻ thêm vài nội dung hay ho 📚',
+    '',
+    'Nếu thấy group ổn hơn chút, mời bot ly cà phê nha 😄',
+    'Không bắt buộc đâu, chỉ là động lực nhỏ thôi 🫶'
+  ],
+  [
+    '☕ Cuối tuần chill rồi nè!',
+    '',
+    'Bot tuần này vẫn chăm chỉ:',
+    '• Dọn spam, lọc link ref',
+    '• Góp chút nội dung hữu ích cho group',
+    '',
+    'Thấy ok thì mời bot ly cà phê nhẹ nhẹ nha 😆',
+    'Không ép đâu, chủ yếu là vui thôi!'
+  ],
+  [
+    '☕ Hello thứ 7!',
+    '',
+    'Một tuần nữa trôi qua, bot vẫn:',
+    '• Giữ group gọn gàng hơn',
+    '• Chia sẻ thêm vài thứ đáng đọc 📚',
+    '',
+    'Nếu bạn thấy có ích, có thể ủng hộ bot ly cà phê nhé ☕',
+    'Cảm ơn mọi người rất nhiều 🙏'
+  ],
+  [
+    '☕ Tối thứ 7, bot ghé thăm xíu nè!',
+    '',
+    'Tuần qua bot có làm mấy việc nho nhỏ:',
+    '• Lọc link ref để group đỡ loạn',
+    '• Share thêm vài nội dung hay',
+    '',
+    'Nếu thấy ổn áp thì mời bot ly cà phê nha 😄',
+    'Không bắt buộc nha, chỉ là chút niềm vui thôi 🫶'
+  ]
+];
 
 function inviteUrl(link, username) {
   if (username) return `https://t.me/${String(username).replace('@', '')}`;
@@ -112,17 +159,42 @@ function getEntityText(sourceText = '', entity = {}) {
   if (typeof entity.offset !== 'number' || typeof entity.length !== 'number') {
     return '';
   }
+
   return sourceText.slice(entity.offset, entity.offset + entity.length);
 }
 
-function isTelegramReferralLink(value = '') {
-  return TELEGRAM_REF_LINK_REGEX.test(String(value || '').trim());
+function findTelegramBotRefLinks(value = '') {
+  const text = String(value || '');
+  const matches = [];
+  let match;
+
+  TELEGRAM_BOT_REF_REGEX.lastIndex = 0;
+
+  while ((match = TELEGRAM_BOT_REF_REGEX.exec(text)) !== null) {
+    const fullUrl = match[0];
+    const botUsername = String(match[1] || '').toLowerCase();
+    const startCode = match[2] || '';
+
+    if (ALLOWED_REF_BOTS.includes(botUsername)) {
+      continue;
+    }
+
+    matches.push({
+      url: fullUrl,
+      botUsername,
+      startCode
+    });
+  }
+
+  return matches;
 }
 
-function hasReferralTelegramLink(text = '', msg = {}) {
-  if (isTelegramReferralLink(text)) return true;
-
+function findReferralLinksInMessage(msg = {}) {
   const sourceText = String(msg.text || msg.caption || '');
+  const found = [];
+
+  found.push(...findTelegramBotRefLinks(sourceText));
+
   const entities = [
     ...(msg.entities || []),
     ...(msg.caption_entities || [])
@@ -130,25 +202,27 @@ function hasReferralTelegramLink(text = '', msg = {}) {
 
   for (const entity of entities) {
     if (entity.type === 'text_link' && entity.url) {
-      if (isTelegramReferralLink(entity.url)) {
-        return true;
-      }
+      found.push(...findTelegramBotRefLinks(entity.url));
     }
 
     if (entity.type === 'url') {
       const entityText = getEntityText(sourceText, entity);
-      if (isTelegramReferralLink(entityText)) {
-        return true;
-      }
+      found.push(...findTelegramBotRefLinks(entityText));
     }
   }
 
-  return false;
+  const unique = new Map();
+
+  for (const item of found) {
+    unique.set(item.url.toLowerCase(), item);
+  }
+
+  return [...unique.values()];
 }
 
 function warningText(reason = 'nội dung không phù hợp') {
   const lines = {
-    ref_link: 'Link ref Telegram này bot xin giữ ngoài cửa nha 😌',
+    ref_link: 'Link ref bot Telegram này bot xin giữ ngoài cửa nha 😌',
     banned: 'Từ này hơi gắt, bot cất giúp rồi nhé.',
     both: 'Nhóm mình nói chuyện xinh thôi, đừng làm bot khó xử 🥹'
   };
@@ -165,6 +239,35 @@ async function sendCoffee(ctx, text = coffeeCaption()) {
   }
 
   return ctx.reply(text, adminKeyboard());
+}
+
+function getRandomCoffeeMessage() {
+  return COFFEE_MESSAGES[Math.floor(Math.random() * COFFEE_MESSAGES.length)].join('\n');
+}
+
+async function sendWeeklyCoffeeReminder() {
+  if (!REMINDER_GROUP_ID) {
+    console.log('Skip weekly reminder: missing REMINDER_GROUP_ID');
+    return;
+  }
+
+  const caption = getRandomCoffeeMessage();
+
+  try {
+    if (HAS_QR) {
+      await bot.telegram.sendPhoto(
+        REMINDER_GROUP_ID,
+        Input.fromLocalFile(QR_PATH),
+        { caption }
+      );
+    } else {
+      await bot.telegram.sendMessage(REMINDER_GROUP_ID, caption);
+    }
+
+    console.log('Weekly coffee reminder sent');
+  } catch (e) {
+    console.error('Weekly coffee reminder failed:', e.response?.description || e.message);
+  }
 }
 
 function getAdminCacheKey(chatId, userId) {
@@ -299,14 +402,17 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  const isReferralLink = hasReferralTelegramLink(text, msg);
+  const referralLinks = findReferralLinksInMessage(msg);
+  const isReferralLink = referralLinks.length > 0;
   const isBanned = hasBannedWord(text);
 
   console.log('Moderation check:', {
+    userId: msg.from?.id,
+    username: msg.from?.username,
     text,
     isReferralLink,
-    isBanned,
-    entities: msg.entities || msg.caption_entities || []
+    referralLinks,
+    isBanned
   });
 
   if (!isReferralLink && !isBanned) {
@@ -324,7 +430,14 @@ bot.on('message', async (ctx) => {
     const deleted = await safeDeleteMessage(ctx, ctx.chat.id, msg.message_id);
     if (!deleted) return;
 
-    console.log('Deleted message:', msg.message_id);
+    console.log('Deleted violation:', {
+      chatId: ctx.chat.id,
+      messageId: msg.message_id,
+      userId: msg.from?.id,
+      username: msg.from?.username,
+      reason,
+      referralLinks
+    });
 
     const notice = await ctx.reply(warningText(reason));
     console.log('Sent notice:', notice.message_id);
@@ -334,9 +447,16 @@ bot.on('message', async (ctx) => {
     }, 8000);
   } catch (e) {
     console.error('Moderation flow failed:', e.response?.description || e.message);
-    console.error('Entities:', msg.entities || msg.caption_entities || []);
   }
 });
+
+cron.schedule(
+  '0 21 * * 6',
+  sendWeeklyCoffeeReminder,
+  {
+    timezone: 'Asia/Ho_Chi_Minh'
+  }
+);
 
 bot.catch((err, ctx) => {
   console.error(
@@ -352,6 +472,7 @@ bot.launch()
   .then(() => {
     console.log('Bot is running...');
     console.log('Waiting for updates...');
+    console.log('Weekly coffee reminder scheduled: Saturday 21:00 Asia/Ho_Chi_Minh');
   })
   .catch((err) => {
     console.error('Launch failed:', err.response?.description || err.message);
